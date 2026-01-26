@@ -7,110 +7,103 @@ import zipfile
 import csv
 import io
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Configuration ---
 IS_GITHUB = os.getenv('GITHUB_ACTIONS') == 'true'
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-VPN_SOURCES = [
-    {"type": "html", "url": "https://www.vpngate.net/en/"},
-    {"type": "csv", "url": "http://www.vpngate.net/api/iphone/"}
-]
+MAIN_URL = "https://www.vpngate.net/en/"
+MIRROR_LIST_URL = "https://www.vpngate.net/en/sites.aspx"
+API_PATH = "api/iphone/"
 
 OUTPUT_FILE = "sstp_hosts.txt"
 
 if not IS_GITHUB:
     OUTPUT_FILE = os.path.join(os.getcwd(), OUTPUT_FILE)
 
-def extract_from_html(url):
+# هدر مرورگر برای جلوگیری از مسدود شدن
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
+}
+
+def get_active_mirrors():
     """
-    استخراج آدرس‌ها به همراه پورت دقیق از صفحه HTML
-    خروجی: لیستی از رشته‌ها مثل 'vpn123.opengw.net:1661'
+    دریافت لیست سایت‌های آینه‌ای فعال از صفحه مخصوص آن
     """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
-    }
-    hosts = []
-    print(f"Scraping HTML from {url}...")
+    mirrors = []
+    print(f"🔍 Fetching mirror list from {MIRROR_LIST_URL}...")
     try:
-        response = requests.get(url, headers=headers, timeout=20)
-        response.raise_for_status()
+        response = requests.get(MIRROR_LIST_URL, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # پیدا کردن لینک‌هایی که شبیه آدرس میرور هستند
+        # معمولا در تگ‌های <strong> یا لیست‌ها قرار دارند
+        # الگوی میرورها معمولا http://vpngate-IP... است
+        for link in soup.find_all('a', href=True):
+            href = link['href']
+            if "vpngate" in href and "http" in href and href.count('/') <= 3:
+                # تمیز کردن URL (حذف اسلش آخر)
+                clean_url = href.rstrip('/')
+                if clean_url not in mirrors:
+                    mirrors.append(clean_url)
+        
+        print(f"✅ Found {len(mirrors)} mirrors.")
+    except Exception as e:
+        print(f"⚠️ Error fetching mirrors: {e}")
+    
+    # همیشه سایت اصلی را هم به عنوان اولین گزینه اضافه می‌کنیم
+    if "http://www.vpngate.net" not in mirrors:
+        mirrors.insert(0, "http://www.vpngate.net")
+        
+    return mirrors
+
+def extract_from_html(url):
+    """استخراج از HTML برای پورت‌های خاص"""
+    hosts = []
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=10)
+        if response.status_code != 200: return []
         
         soup = BeautifulSoup(response.text, 'html.parser')
-        # پترن برای پیدا کردن آدرس و پورت
         pattern = re.compile(r"SSTP Hostname\s*:\s*([a-zA-Z0-9\.\-]+(?::\d+)?)")
-        
         elements = soup.find_all(string=re.compile("SSTP Hostname"))
 
         for element in elements:
             parent_text = element.parent.get_text()
             match = pattern.search(parent_text)
             if match:
-                host = match.group(1)
-                hosts.append(host)
-    except Exception as e:
-        print(f"Error scraping HTML: {e}")
-    
+                hosts.append(match.group(1))
+    except:
+        pass
     return hosts
 
-def extract_from_csv(url, existing_domains):
-    """
-    استخراج از CSV با شرط:
-    1. اگر public-vpn بود -> بدون پورت
-    2. اگر غیر public-vpn بود -> چک کن اگر در HTML نبود، با پورت 443 اضافه کن
-    """
+def fetch_csv_from_mirror(base_url):
+    """دانلود و پردازش CSV از یک آدرس خاص"""
+    csv_url = f"{base_url}/{API_PATH}"
     hosts = []
-    print(f"Downloading CSV from {url}...")
     try:
-        response = requests.get(url, timeout=60)
-        response.raise_for_status()
+        response = requests.get(csv_url, timeout=10)
+        if response.status_code != 200: return []
         
         content = response.text
         lines = content.splitlines()
+        csv_clean_lines = [line[1:] if line.startswith("#HostName") else line 
+                          for line in lines if (line.startswith("#HostName") or (not line.startswith("*") and not line.startswith("#")))]
         
-        csv_clean_lines = []
-        start_reading = False
-        
-        for line in lines:
-            if line.startswith("#HostName"):
-                start_reading = True
-                csv_clean_lines.append(line[1:]) 
-                continue
-            
-            if start_reading and line.strip() != "":
-                csv_clean_lines.append(line)
-
         f = io.StringIO("\n".join(csv_clean_lines))
         reader = csv.DictReader(f)
         
         for row in reader:
             hostname = row.get("HostName")
-            
             if hostname:
-                # ساخت آدرس کامل
                 if ".opengw.net" not in hostname:
-                    full_domain = f"{hostname}.opengw.net"
+                    hosts.append(f"{hostname}.opengw.net")
                 else:
-                    full_domain = hostname
-                
-                # --- منطق فیلتر کردن طبق درخواست شما ---
-                
-                # حالت 1: اگر public-vpn است -> بدون پورت اضافه کن
-                if "public-vpn" in full_domain:
-                    hosts.append(full_domain)
-                
-                # حالت 2: اگر public-vpn نیست (مثل vpn123...)
-                else:
-                    # چک می‌کنیم آیا این دامنه قبلاً در HTML (که پورت دقیق دارد) پیدا شده؟
-                    if full_domain not in existing_domains:
-                        # اگر نبود، با پورت 443 اضافه کن
-                        hosts.append(f"{full_domain}:443")
-                    # اگر بود، کاری نمی‌کنیم (چون نسخه HTML پورت دقیق‌تری دارد)
-
-    except Exception as e:
-        print(f"Error downloading CSV: {e}")
-    
+                    hosts.append(hostname)
+    except:
+        pass
     return hosts
 
 def send_to_telegram(file_path, caption):
@@ -120,66 +113,80 @@ def send_to_telegram(file_path, caption):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
     try:
         with open(file_path, 'rb') as f:
-            response = requests.post(url, data={
-                'chat_id': TELEGRAM_CHAT_ID, 
-                'caption': caption,
-                'parse_mode': 'Markdown'
-            }, files={'document': f})
-        print(f"Telegram Response: {response.status_code}")
+            requests.post(url, data={'chat_id': TELEGRAM_CHAT_ID, 'caption': caption, 'parse_mode': 'Markdown'}, files={'document': f})
     except Exception as e:
         print(f"Telegram Error: {e}")
 
 def main():
     start_time = time.time()
-    final_list = []
     
-    # ست برای نگهداری دامنه‌هایی که در HTML پیدا شدند (برای جلوگیری از تکرار در CSV)
-    html_domains_seen = set()
+    # 1. دریافت لیست میرورها
+    mirrors = get_active_mirrors()
+    
+    # لیست نهایی (استفاده از دیکشنری برای جلوگیری از تکرار و مدیریت پورت)
+    # Key: Domain, Value: Port (or None)
+    final_hosts_map = {}
 
-    # 1. دریافت از HTML (این‌ها پورت دقیق دارند مثل :1661)
-    html_hosts = extract_from_html(VPN_SOURCES[0]['url'])
-    
+    # 2. دریافت از HTML سایت اصلی (برای پورت‌های دقیق)
+    print("📥 Scraping Main HTML...")
+    html_hosts = extract_from_html(MAIN_URL)
     for h in html_hosts:
-        final_list.append(h)
-        # جدا کردن دامنه از پورت برای بررسی بعدی
-        # مثلا vpn123.opengw.net:1661 -> vpn123.opengw.net
-        domain_only = h.split(':')[0]
-        html_domains_seen.add(domain_only)
+        if ":" in h:
+            domain, port = h.split(":")
+            final_hosts_map[domain] = port
+        else:
+            final_hosts_map[h] = "443"
 
-    # 2. دریافت از CSV (با منطق خاص: public-vpn بدون پورت)
-    csv_hosts = extract_from_csv(VPN_SOURCES[1]['url'], html_domains_seen)
+    # 3. دریافت CSV از تمام میرورها (به صورت همزمان برای سرعت بیشتر)
+    print(f"📥 Downloading CSVs from {len(mirrors)} sources (Parallel)...")
     
-    for h in csv_hosts:
-        # چک نهایی برای تکراری نبودن کل رشته
-        if h not in final_list:
-            final_list.append(h)
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_url = {executor.submit(fetch_csv_from_mirror, url): url for url in mirrors}
+        
+        for future in as_completed(future_to_url):
+            found_hosts = future.result()
+            for domain in found_hosts:
+                # اگر دامنه قبلاً با پورت خاص (از HTML) اضافه نشده بود، اضافه کن
+                if domain not in final_hosts_map:
+                    final_hosts_map[domain] = "DEFAULT" # علامت‌گذاری برای پردازش نهایی
 
-    # مرتب‌سازی الفبایی
-    final_list.sort()
+    # 4. فرمت‌دهی نهایی طبق درخواست شما
+    # public-vpn -> بدون پورت
+    # بقیه -> اگر پورت خاص داشت (از HTML) همان پورت، اگر نه -> 443
     
-    # آمارگیری
-    public_vpn_count = sum(1 for h in final_list if "public-vpn" in h)
-    other_count = len(final_list) - public_vpn_count
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    output_list = []
+    for domain, port in final_hosts_map.items():
+        if "public-vpn" in domain:
+            output_list.append(domain) # بدون پورت
+        else:
+            if port == "DEFAULT":
+                output_list.append(f"{domain}:443")
+            else:
+                output_list.append(f"{domain}:{port}")
 
-    # ذخیره در فایل
+    output_list.sort()
+    
+    # آمار
+    public_vpn_count = sum(1 for h in output_list if "public-vpn" in h)
+    
+    # ذخیره
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        for line in final_list:
+        for line in output_list:
             f.write(line + '\n')
-    
-    # گزارش
-    summary_report = f"🌐 *VPN Gate Custom List*\n📅 Date: `{now}`\n\n"
-    summary_report += f"📊 Breakdown:\n"
+            
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    summary_report = f"🌐 *VPN Gate Ultimate Collector*\n📅 Date: `{now}`\n\n"
+    summary_report += f"🔍 Sources Checked: {len(mirrors)} Mirrors\n"
+    summary_report += f"📊 Stats:\n"
     summary_report += f"🔹 Public-VPN (No Port): {public_vpn_count}\n"
-    summary_report += f"🔹 Others (With Port): {other_count}\n"
+    summary_report += f"🔹 Others (With Port): {len(output_list) - public_vpn_count}\n"
     summary_report += f"{'-'*25}\n"
-    summary_report += f"✅ *Total Hosts:* `{len(final_list)}`\n"
+    summary_report += f"✅ *Total Unique Hosts:* `{len(output_list)}`\n"
     summary_report += f"⏱ Time: `{int(time.time() - start_time)}s`"
 
     print(summary_report)
 
-    # فشرده‌سازی
-    zip_name = "SSTP_List.zip"
+    zip_name = "SSTP_Ultimate.zip"
     with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
         if os.path.exists(OUTPUT_FILE):
             zipf.write(OUTPUT_FILE, os.path.basename(OUTPUT_FILE))
