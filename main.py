@@ -13,10 +13,9 @@ IS_GITHUB = os.getenv('GITHUB_ACTIONS') == 'true'
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# لیست منابع: هم سایت اصلی (برای پورت‌های خاص) و هم API (برای لیست کامل)
 VPN_SOURCES = [
     {"type": "html", "url": "https://www.vpngate.net/en/"},
-    {"type": "csv", "url": "http://www.vpngate.net/api/iphone/"} # این لینک دیتابیس اصلی برنامه است
+    {"type": "csv", "url": "http://www.vpngate.net/api/iphone/"}
 ]
 
 OUTPUT_FILE = "sstp_hosts.txt"
@@ -25,7 +24,10 @@ if not IS_GITHUB:
     OUTPUT_FILE = os.path.join(os.getcwd(), OUTPUT_FILE)
 
 def extract_from_html(url):
-    """استخراج از صفحه وب برای پیدا کردن پورت‌های خاص"""
+    """
+    استخراج آدرس‌ها به همراه پورت دقیق از صفحه HTML
+    خروجی: لیستی از رشته‌ها مثل 'vpn123.opengw.net:1661'
+    """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36"
     }
@@ -36,7 +38,7 @@ def extract_from_html(url):
         response.raise_for_status()
         
         soup = BeautifulSoup(response.text, 'html.parser')
-        # پترن برای پیدا کردن آدرس به همراه پورت
+        # پترن برای پیدا کردن آدرس و پورت
         pattern = re.compile(r"SSTP Hostname\s*:\s*([a-zA-Z0-9\.\-]+(?::\d+)?)")
         
         elements = soup.find_all(string=re.compile("SSTP Hostname"))
@@ -52,45 +54,59 @@ def extract_from_html(url):
     
     return hosts
 
-def extract_from_csv(url):
-    """استخراج از فایل CSV (دیتابیس اصلی برنامه SoftEther)"""
+def extract_from_csv(url, existing_domains):
+    """
+    استخراج از CSV با شرط:
+    1. اگر public-vpn بود -> بدون پورت
+    2. اگر غیر public-vpn بود -> چک کن اگر در HTML نبود، با پورت 443 اضافه کن
+    """
     hosts = []
     print(f"Downloading CSV from {url}...")
     try:
-        response = requests.get(url, timeout=30)
+        response = requests.get(url, timeout=60)
         response.raise_for_status()
         
-        # پردازش فایل CSV
-        # خطوط اول فایل توضیحات هستند، باید رد شوند تا به هدر برسیم
         content = response.text
         lines = content.splitlines()
         
-        # پیدا کردن خط شروع دیتا (معمولا با HostName شروع می‌شود یا بعد از *vpn_servers)
-        csv_data = []
+        csv_clean_lines = []
         start_reading = False
         
         for line in lines:
-            if line.startswith("#HostName") or line.startswith("HostName"):
+            if line.startswith("#HostName"):
                 start_reading = True
-                # حذف # از ابتدای هدر اگر باشد
-                csv_data.append(line.replace("#", "")) 
+                csv_clean_lines.append(line[1:]) 
                 continue
             
             if start_reading and line.strip() != "":
-                csv_data.append(line)
+                csv_clean_lines.append(line)
 
-        # تبدیل به فرمت قابل خواندن برای ماژول csv
-        f = io.StringIO("\n".join(csv_data))
+        f = io.StringIO("\n".join(csv_clean_lines))
         reader = csv.DictReader(f)
         
         for row in reader:
-            # ستون HostName حاوی آدرس است (مثلا vpn123.opengw.net)
             hostname = row.get("HostName")
-            if hostname and "opengw.net" in hostname:
-                # در فایل CSV پورت SSTP معمولا ذکر نمی‌شود چون پیش‌فرض 443 است.
-                # اما ما خود آدرس را اضافه می‌کنیم.
-                # اگر بخواهید پورت 443 را زورکی اضافه کنید: f"{hostname}:443"
-                hosts.append(f"{hostname}:443") 
+            
+            if hostname:
+                # ساخت آدرس کامل
+                if ".opengw.net" not in hostname:
+                    full_domain = f"{hostname}.opengw.net"
+                else:
+                    full_domain = hostname
+                
+                # --- منطق فیلتر کردن طبق درخواست شما ---
+                
+                # حالت 1: اگر public-vpn است -> بدون پورت اضافه کن
+                if "public-vpn" in full_domain:
+                    hosts.append(full_domain)
+                
+                # حالت 2: اگر public-vpn نیست (مثل vpn123...)
+                else:
+                    # چک می‌کنیم آیا این دامنه قبلاً در HTML (که پورت دقیق دارد) پیدا شده؟
+                    if full_domain not in existing_domains:
+                        # اگر نبود، با پورت 443 اضافه کن
+                        hosts.append(f"{full_domain}:443")
+                    # اگر بود، کاری نمی‌کنیم (چون نسخه HTML پورت دقیق‌تری دارد)
 
     except Exception as e:
         print(f"Error downloading CSV: {e}")
@@ -115,40 +131,55 @@ def send_to_telegram(file_path, caption):
 
 def main():
     start_time = time.time()
-    all_hosts = set() # استفاده از set برای حذف تکراری‌ها
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    final_list = []
+    
+    # ست برای نگهداری دامنه‌هایی که در HTML پیدا شدند (برای جلوگیری از تکرار در CSV)
+    html_domains_seen = set()
 
-    # 1. دریافت از HTML (برای پورت‌های خاص)
+    # 1. دریافت از HTML (این‌ها پورت دقیق دارند مثل :1661)
     html_hosts = extract_from_html(VPN_SOURCES[0]['url'])
+    
     for h in html_hosts:
-        all_hosts.add(h)
+        final_list.append(h)
+        # جدا کردن دامنه از پورت برای بررسی بعدی
+        # مثلا vpn123.opengw.net:1661 -> vpn123.opengw.net
+        domain_only = h.split(':')[0]
+        html_domains_seen.add(domain_only)
 
-    # 2. دریافت از CSV (برای لیست کامل مشابه برنامه)
-    csv_hosts = extract_from_csv(VPN_SOURCES[1]['url'])
+    # 2. دریافت از CSV (با منطق خاص: public-vpn بدون پورت)
+    csv_hosts = extract_from_csv(VPN_SOURCES[1]['url'], html_domains_seen)
+    
     for h in csv_hosts:
-        all_hosts.add(h)
+        # چک نهایی برای تکراری نبودن کل رشته
+        if h not in final_list:
+            final_list.append(h)
 
-    # تبدیل به لیست و مرتب‌سازی
-    sorted_hosts = sorted(list(all_hosts))
+    # مرتب‌سازی الفبایی
+    final_list.sort()
+    
+    # آمارگیری
+    public_vpn_count = sum(1 for h in final_list if "public-vpn" in h)
+    other_count = len(final_list) - public_vpn_count
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     # ذخیره در فایل
     with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
-        for line in sorted_hosts:
+        for line in final_list:
             f.write(line + '\n')
     
     # گزارش
-    summary_report = f"🌐 *VPN Gate Full Update Report*\n📅 Date: `{now}`\n\n"
-    summary_report += f"Sources:\n"
-    summary_report += f"🔹 HTML Scrape: {len(html_hosts)}\n"
-    summary_report += f"🔹 CSV API: {len(csv_hosts)}\n"
+    summary_report = f"🌐 *VPN Gate Custom List*\n📅 Date: `{now}`\n\n"
+    summary_report += f"📊 Breakdown:\n"
+    summary_report += f"🔹 Public-VPN (No Port): {public_vpn_count}\n"
+    summary_report += f"🔹 Others (With Port): {other_count}\n"
     summary_report += f"{'-'*25}\n"
-    summary_report += f"✅ *Total Unique Hosts:* `{len(sorted_hosts)}`\n"
+    summary_report += f"✅ *Total Hosts:* `{len(final_list)}`\n"
     summary_report += f"⏱ Time: `{int(time.time() - start_time)}s`"
 
     print(summary_report)
 
-    # فشرده‌سازی و ارسال
-    zip_name = "SSTP_Full_List.zip"
+    # فشرده‌سازی
+    zip_name = "SSTP_List.zip"
     with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
         if os.path.exists(OUTPUT_FILE):
             zipf.write(OUTPUT_FILE, os.path.basename(OUTPUT_FILE))
