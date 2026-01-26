@@ -1,0 +1,42 @@
+name: VPN Gate SSTP Auto-Update
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */6 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  update-sstp:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    
+    - uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: Install Dependencies
+      run: pip install requests beautifulsoup4
+
+    - name: Run SSTP Scraper Script
+      env:
+        TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      run: python main.py
+
+    - name: Commit and Push Changes
+      run: |
+        git config --global user.name "GitHub Action Bot"
+        git config --global user.email "action@github.com"
+        
+        if [ -f "SSTP_Configs.zip" ]; then
+          git add *.txt SSTP_Configs.zip
+          git commit -m "🔄 Update SSTP Hosts [$(date)]" || echo "No changes to commit"
+          git push
+        else
+          echo "No ZIP file found to upload."
+        fi
