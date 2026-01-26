@@ -1,9 +1,9 @@
-name: VPN Gate SSTP Auto-Update
+.name: VPN Gate SSTP Auto-Update
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 */6 * * *'
+    - cron: '0 */24 * * *'
 
 permissions:
   contents: write
