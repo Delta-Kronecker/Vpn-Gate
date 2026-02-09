@@ -160,7 +160,7 @@ def main():
     summary_report += f"🔥 Public-VPN (443 Port): {public_vpn_count}\n"
     summary_report += f"🔥 Others (With Port): {len(output_list) - public_vpn_count}\n"
     summary_report += f"{'-'*25}\n"
-    summary_report += f"🔥 *Total Unique Hosts:* `{len(output_list)}`
+    summary_report += f"🔥 *Total Unique Hosts:* `{len(output_list)}`"
 
     print(summary_report)
 
