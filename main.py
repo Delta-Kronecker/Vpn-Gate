@@ -164,7 +164,7 @@ def main():
 
     print(summary_report)
 
-    zip_name = "SSTP_Ultimate.zip"
+    zip_name = "vpnGate_SSTP.zip"
     with zipfile.ZipFile(zip_name, 'w', zipfile.ZIP_DEFLATED) as zipf:
         if os.path.exists(OUTPUT_FILE):
             zipf.write(OUTPUT_FILE, os.path.basename(OUTPUT_FILE))
