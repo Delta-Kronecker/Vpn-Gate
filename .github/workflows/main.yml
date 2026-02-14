@@ -33,8 +33,8 @@ jobs:
         git config --global user.name "GitHub Action Bot"
         git config --global user.email "action@github.com"
         
-        if [ -f "SSTP_Configs.zip" ]; then
-          git add *.txt SSTP_Configs.zip
+        if [ -f "vpnGate_SSTPs.zip" ]; then
+          git add *.txt vpnGate_SSTPs.zip
           git commit -m "🔄 Update SSTP Hosts [$(date)]" || echo "No changes to commit"
           git push
         else
