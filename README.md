@@ -41,3 +41,13 @@ You don't need any extra software. You can connect using the built-in Windows VP
 
 ## ⚠️ Disclaimer
 This project is for educational and research purposes only. The developers are not responsible for any misuse of this tool.
+
+## 🔥 Keep This Project Going!
+
+If you're finding this useful, please show your support:
+
+⭐ **Star the repository on GitHub**
+
+⭐ **Star our [Telegram posts](https://t.me/DeltaKroneckerGithub)** 
+
+Your stars fuel our motivation to keep improving!
