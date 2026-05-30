@@ -1,4 +1,3 @@
-name: VPN Gate SSTP Auto-Update
 
 on:
   workflow_dispatch:
