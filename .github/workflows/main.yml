@@ -1,4 +1,3 @@
-
 on:
   workflow_dispatch:
   schedule:
@@ -33,9 +32,14 @@ jobs:
         git config --global user.email "action@github.com"
         
         if [ -f "vpnGate_SSTP.zip" ]; then
-          git add *.txt vpnGate_SSTPs.zip
+          git add vpnGate_SSTP.zip sstp_hosts.txt
           git commit -m "🔄 Update SSTP Hosts [$(date)]" || echo "No changes to commit"
           git push
         else
           echo "No ZIP file found to upload."
+          if [ -f "sstp_hosts.txt" ]; then
+            git add sstp_hosts.txt
+            git commit -m "🔄 Update SSTP Hosts (txt only) [$(date)]" || echo "No changes to commit"
+            git push
+          fi
         fi
