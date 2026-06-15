@@ -1,4 +1,4 @@
-# مخزن نیاز به اپدیت دارد فعلا کار نمی کند
+
 # 🌐 VPN Gate SSTP Collector & Auto-Updater
 
 This project is an advanced automation tool designed to scrape, validate, and accumulate **SSTP VPN** server addresses from [VPN Gate](https://www.vpngate.net/).
