@@ -1,11 +1,11 @@
 
-# 🌐 VPN Gate SSTP Collector & Auto-Updater
+# VPN Gate SSTP Collector & Auto-Updater
 
 This project is an advanced automation tool designed to scrape, validate, and accumulate **SSTP VPN** server addresses from [VPN Gate](https://www.vpngate.net/).
 
 It maintains an **accumulative database**, meaning it remembers servers from previous scans, allowing the list to grow beyond the standard limits.
 
-## 📥 Direct Download
+## Direct Download
 
 You can download the latest updated list of SSTP servers directly from the link below:
 
@@ -13,15 +13,7 @@ You can download the latest updated list of SSTP servers directly from the link 
 
 ---
 
-# 📢 Telegram Channel
-
-All final results are automatically compressed into a ZIP file and uploaded to our Telegram channel:
-
-🔹 **Main Channel:** [DeltaKroneckerFreedom](https://t.me/GitKroneckerDelta)  
-
----
-
-## 💻 How to Use (Windows Native VPN)
+## How to Use (Windows Native VPN)
 
 You don't need any extra software. You can connect using the built-in Windows VPN settings:
 
@@ -40,15 +32,7 @@ You don't need any extra software. You can connect using the built-in Windows VP
 
 > **Note:** If a server fails to connect, simply try another address from the list.
 
-## ⚠️ Disclaimer
+## Disclaimer
 This project is for educational and research purposes only. The developers are not responsible for any misuse of this tool.
 
-## 🔥 Keep This Project Going!
 
-If you're finding this useful, please show your support:
-
-⭐ **Star the repository on GitHub**
-
-⭐ **Star our [Telegram posts](https://t.me/DeltaKroneckerGithub)** 
-
-Your stars fuel our motivation to keep improving!
