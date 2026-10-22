@@ -22,7 +22,7 @@ API_PATH = "api/iphone/"
 OUTPUT_FILE = "sstp_hosts.txt"
 RAW_FILE = "sstp_hosts_raw.txt"
 
-if not IMPORT_IS_GITHUB:
+if not IS_GITHUB:
     OUTPUT_FILE = os.path.join(os.getcwd(), OUTPUT_FILE)
     RAW_FILE = os.path.join(os.getcwd(), RAW_FILE)
 
