@@ -140,7 +140,7 @@ def list_ppp_interfaces():
                            capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             return set()
-        return set(re.findall(r'\bppp\d+', r.stdout))
+        return set(re.findall(r'\b(?:ppp\d+|sstp[0-9A-Za-z]+)\b', r.stdout))
     except Exception:
         return set()
 
@@ -241,6 +241,8 @@ def ppp_iface_ready(iface):
 LOCAL_PUBLIC_IP = None
 GEO_LOCK = threading.Lock()
 PRINT_LOCK = threading.Lock()
+IFACE_LOCK = threading.Lock()
+ALL_IFACE_SNAPSHOT = set()
 
 def local_public_ip():
     """The runner's direct egress IP (cached) - used to detect leaked probes."""
@@ -293,10 +295,19 @@ def connect_test(host, port, line, log_path):
     while time.time() - started < CONNECT_TIMEOUT:
         if proc.poll() is not None:
             break  # sstpc exited -> tunnel never came up
-        if iface_name in list_ppp_interfaces():
-            if ppp_iface_ready(iface_name):
-                ppp_iface = iface_name
-                break  # addresses assigned, tunnel usable
+        # Preferred: our dedicated, uniquely named interface
+        if iface_name in list_ppp_interfaces() and ppp_iface_ready(iface_name):
+            ppp_iface = iface_name
+            break
+        # Fallback: claim any newly appeared pppX (in case ifname was ignored)
+        with IFACE_LOCK:
+            new_ifaces = list_ppp_interfaces() - ALL_IFACE_SNAPSHOT
+            if new_ifaces:
+                claimed = sorted(new_ifaces)[0]
+                ALL_IFACE_SNAPSHOT.add(claimed)
+                if ppp_iface_ready(claimed):
+                    ppp_iface = claimed
+                    break
         time.sleep(0.5)
 
     if not ppp_iface:
@@ -331,6 +342,8 @@ def connect_test(host, port, line, log_path):
         if ppp_iface not in list_ppp_interfaces():
             break
         time.sleep(0.5)
+    with IFACE_LOCK:
+        ALL_IFACE_SNAPSHOT.discard(ppp_iface)
 
     return result
 
@@ -482,6 +495,8 @@ def main():
         return 0
 
     # ------------------------------------------------------------------ full test
+    ALL_IFACE_SNAPSHOT.clear()
+    ALL_IFACE_SNAPSHOT.update(list_ppp_interfaces())
     log(f'Starting SSTP connect-test on {len(raw_lines)} hosts '
         f'({PARALLEL} dials in parallel, up to {ATTEMPTS} attempts per host, '
         'country detected through the tunnel)...')
