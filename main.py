@@ -3,6 +3,8 @@ from bs4 import BeautifulSoup
 import re
 import time
 import os
+import sys
+import subprocess
 import zipfile
 import csv
 import io
@@ -18,9 +20,11 @@ MIRROR_LIST_URL = "https://www.vpngate.net/en/sites.aspx"
 API_PATH = "api/iphone/"
 
 OUTPUT_FILE = "sstp_hosts.txt"
+RAW_FILE = "sstp_hosts_raw.txt"
 
-if not IS_GITHUB:
+if not IMPORT_IS_GITHUB:
     OUTPUT_FILE = os.path.join(os.getcwd(), OUTPUT_FILE)
+    RAW_FILE = os.path.join(os.getcwd(), RAW_FILE)
 
 
 HEADERS = {
@@ -108,10 +112,66 @@ def send_to_telegram(file_path, caption):
     except Exception as e:
         print(f"Telegram Error: {e}")
 
+def run_validation():
+    """Run validate.py: connect-test each host with sstp-client and build
+    sstp_hosts.txt grouped by country. Falls back gracefully if validation
+    cannot run (returns False)."""
+    cmd = [sys.executable, 'validate.py']
+    try:
+        result = subprocess.run(cmd, timeout=7200)
+        if result.returncode == 0 and os.path.exists(OUTPUT_FILE):
+            with open(OUTPUT_FILE, 'r', encoding='utf-8', errors='replace') as f:
+                return any(ln.strip() for ln in f)
+    except Exception as e:
+        print(f"Validation pipeline error: {e}")
+    return False
+
+
+def write_flat_fallback(output_list):
+    """Old-style plain list, in case the connection-validated file is missing."""
+    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+        for line in sorted(output_list):
+            f.write(line + '\n')
+
+
+def parse_final_summary():
+    """Read the generated sstp_hosts.txt: server entries + per-country counts."""
+    servers = []
+    countries = {}
+    verified = False
+    with open(OUTPUT_FILE, 'r', encoding='utf-8', errors='replace') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith('#'):
+                if 'Real SSTP connection test' in line:
+                    verified = True
+                continue
+            m = re.match(r'^=== (.+?) \(([A-Z]{2,3})\) ', line)
+            if m:
+                countries[m.group(1)] = None  # key order; count filled below
+                continue
+            servers.append(line)
+            # re-walk below for count
+    # second pass for counts
+    with open(OUTPUT_FILE, 'r', encoding='utf-8', errors='replace') as f:
+        current = None
+        for line in f:
+            line = line.strip()
+            m = re.match(r'^=== (.+?) \(([A-Z]{2,3})\) ', line)
+            if m:
+                current = m.group(1)
+                countries.setdefault(current, 0)
+            elif current and line and not line.startswith('#'):
+                countries[current] = countries.get(current, 0) + 1
+    return servers, countries, verified
+
+
 def main():
     start_time = time.time()
-    
-    
+
+
     mirrors = get_active_mirrors()
     final_hosts_map = {}
 
@@ -125,20 +185,20 @@ def main():
             final_hosts_map[h] = "443"
 
     print(f"📥 Downloading CSVs from {len(mirrors)} sources (Parallel)...")
-    
+
     with ThreadPoolExecutor(max_workers=10) as executor:
         future_to_url = {executor.submit(fetch_csv_from_mirror, url): url for url in mirrors}
-        
+
         for future in as_completed(future_to_url):
             found_hosts = future.result()
             for domain in found_hosts:
                 if domain not in final_hosts_map:
-                    final_hosts_map[domain] = "DEFAULT" 
-    
+                    final_hosts_map[domain] = "DEFAULT"
+
     output_list = []
     for domain, port in final_hosts_map.items():
         if "public-vpn" in domain:
-            output_list.append(domain) 
+            output_list.append(domain)
         else:
             if port == "DEFAULT":
                 output_list.append(f"{domain}:443")
@@ -146,21 +206,42 @@ def main():
                 output_list.append(f"{domain}:{port}")
 
     output_list.sort()
-    
-    
-    public_vpn_count = sum(1 for h in output_list if "public-vpn" in h)
-    
-    
-    with open(OUTPUT_FILE, 'w', encoding='utf-8') as f:
+
+    # 1) Persist the raw collected list for the validator
+    with open(RAW_FILE, 'w', encoding='utf-8') as f:
         for line in output_list:
             f.write(line + '\n')
-            
+
+    # 2) Connect-test every host with sstp-client and build the
+    #    country-grouped sstp_hosts.txt
+    print("🧪 Validating servers one-by-one over real SSTP connections...")
+    validated = run_validation()
+    if not validated:
+        print("⚠️ Validation unavailable, writing plain list and continuing.")
+        write_flat_fallback(output_list)
+
+    servers, country_counts, verified = parse_final_summary()
+    total_hosts = len(servers)
+
+    if verified:
+        top_names = sorted(country_counts.items(), key=lambda kv: -kv[1])
+        print("📊 Countries:")
+        for name, count in top_names:
+            print(f"   - {name}: {count}")
+
+    public_vpn_count = sum(1 for h in servers if "public-vpn" in h)
+
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     summary_report = f"*VPN Gate sstp Collector*\nDate: `{now}`\n\n"
+    summary_report += f"*Verified Live (Connected):* `{total_hosts}`\n"
     summary_report += f"Public-VPN (443 Port): {public_vpn_count}\n"
-    summary_report += f"Others (With Port): {len(output_list) - public_vpn_count}\n"
-    summary_report += f"{'-'*25}\n"
-    summary_report += f"*Total Unique Hosts:* `{len(output_list)}`"
+    summary_report += f"Others (With Port): {total_hosts - public_vpn_count}\n"
+    summary_report += "Countries:\n"
+    summary_lines = [f"- {name}: {cnt}" for name, cnt in
+                     sorted(country_counts.items(), key=lambda kv: -kv[1])]
+    summary_report += '\n'.join(summary_lines[:15])
+    summary_report += f"\n{'-'*25}\n"
+    summary_report += f"*Total Unique Hosts:* `{total_hosts}`"
 
     print(summary_report)
 

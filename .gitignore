@@ -1,0 +1,6 @@
+# Intermediate/scratch files
+sstp_hosts_raw.txt
+validate_logs/
+__pycache__/
+*.pyc
+.vpn-gate-*.env

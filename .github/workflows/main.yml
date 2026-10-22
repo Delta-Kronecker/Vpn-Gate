@@ -9,31 +9,40 @@ permissions:
 jobs:
   update-sstp:
     runs-on: ubuntu-latest
+    timeout-minutes: 150
 
     steps:
     - uses: actions/checkout@v4
-    
-    - uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
 
-    - name: Install Dependencies
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install Python Dependencies
       run: pip install requests beautifulsoup4
 
-    - name: Run SSTP Scraper Script
+    - name: Install SSTP Client (sstp-client + ppp)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y sstp-client ppp
+        sudo modprobe ppp_async || true
+
+    - name: Run SSTP Collector and Country Validator
       env:
         TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        SSTP_USER: vpn
+        SSTP_PASSWORD: vpn
       run: python main.py
 
     - name: Commit and Push Changes
       run: |
         git config --global user.name "GitHub Action Bot"
         git config --global user.email "action@github.com"
-        
+
         if [ -f "vpnGate_SSTP.zip" ]; then
           git add vpnGate_SSTP.zip sstp_hosts.txt
-          git commit -m "🔄 Update SSTP Hosts [$(date)]" || echo "No changes to commit"
+          git commit -m "🔄 Update SSTP Hosts (country-grouped) [$(date)]" || echo "No changes to commit"
           git push
         else
           echo "No ZIP file found to upload."

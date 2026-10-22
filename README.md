@@ -5,6 +5,24 @@ This project is an advanced automation tool designed to scrape, validate, and ac
 
 It maintains an **accumulative database**, meaning it remembers servers from previous scans, allowing the list to grow beyond the standard limits.
 
+## File Format
+
+The `sstp_hosts.txt` list is **grouped by country**:
+
+```
+# VPN Gate SSTP Hosts - grouped by country
+...
+=== Japan (JP) - 14 servers ===
+vpnjapan1.opengw.net:443
+=== United States (US) - 8 servers ===
+public-vpn-100.opengw.net
+```
+
+Each entry in a country group has been **connection-verified**: the collector
+actually connects to the server over SSTP and confirms the reported country by
+checking the tunnel's egress IP, so every address that appears under a country
+is a server that answered a real tunnel attempt.
+
 ## Direct Download
 
 You can download the latest updated list of SSTP servers directly from the link below:
