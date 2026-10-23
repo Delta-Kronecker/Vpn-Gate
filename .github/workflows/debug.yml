@@ -29,10 +29,14 @@ jobs:
           > /tmp/sstp.log 2>&1 &
         echo "sstpc launched"
         PPP_OK=0
-        for i in $(seq 1 30); do
-          if ip -o link | grep -Eo 'ppp[0-9]+'; then PPP_OK=1; echo "PPP interface up after ${i}s"; break; fi
+        for i in $(seq 1 40); do
+          IF=$(ip -o link | grep -Eo 'ppp[0-9]+' | head -1)
+          if [ -n "$IF" ] && ip -o -4 addr show dev "$IF" | grep -q inet; then
+            PPP_OK=1; echo "PPP interface $IF up with IP after ${i}s"; break
+          fi
           sleep 1
         done
+        set +e
         if [ "$PPP_OK" = "1" ]; then
           IFACE=$(ip -o link | grep -Eo 'ppp[0-9]+' | head -1)
           echo "Interface: $IFACE"
@@ -40,7 +44,7 @@ jobs:
           GEO_IP=$(getent hosts ip-api.com | awk '{print $1; exit}')
           echo "GeoIP host: $GEO_IP"
           sudo ip route replace "$GEO_IP/32" dev "$IFACE"
-          curl -s --max-time 10 "http://ip-api.com/json/?fields=status,country,countryCode,query"
+          curl -s --max-time 15 "http://ip-api.com/json/?fields=status,country,countryCode,query"
           echo
           sudo ip route del "$GEO_IP/32" || true
         else

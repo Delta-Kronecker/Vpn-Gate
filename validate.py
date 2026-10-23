@@ -144,7 +144,7 @@ def list_ppp_interfaces():
 # GeoIP
 # ------------------------------------------------------------------------------
 
-def geo_via_tunnel(iface):
+def geo_via_tunnel(iface, local_ip=None):
     """Query GeoIP providers through the ppp interface (host route)."""
     for geo_host, geo_url in GEO_PROVIDERS:
         geo_ip = resolve_host(geo_host)
@@ -153,6 +153,8 @@ def geo_via_tunnel(iface):
             if geo_ip:
                 r = sudo([IP, 'route', 'replace', geo_ip + '/32', 'dev', iface])
                 route_added = (r.returncode == 0)
+            if not route_added:
+                continue  # routing failed; never leak the request off-tunnel
             resp = requests.get(geo_url, timeout=TEST_TIMEOUT,
                                 headers={'User-Agent': 'vpngate-collector'})
             data = resp.json()
@@ -160,11 +162,13 @@ def geo_via_tunnel(iface):
             name = data.get('country') or data.get('country_name') or code
             egress = data.get('query') or data.get('ip')
             if code:
+                if egress and local_ip and egress == local_ip:
+                    continue  # did not traverse the tunnel - try next provider
                 return str(code).upper(), name, egress
         except Exception:
             continue
         finally:
-            if route_added:
+            if geo_ip:
                 sudo([IP, 'route', 'del', geo_ip + '/32'])
     return None, None, None
 
@@ -211,6 +215,33 @@ def kill_session(proc):
     sudo(['pkill', '-TERM', 'pppd'])
 
 
+def ppp_iface_ready(iface):
+    """True once the ppp interface negotiated an IPv4 address (link UP)."""
+    try:
+        r = subprocess.run([IP, '-o', '-4', 'addr', 'show', 'dev', iface],
+                           check=False, capture_output=True, text=True,
+                           timeout=10)
+        if r.returncode != 0:
+            return False
+        return ('inet ' in r.stdout)
+    except Exception:
+        return False
+
+
+LOCAL_PUBLIC_IP = None
+
+def local_public_ip():
+    """The runner's direct egress IP (cached) - used to detect leaked probes."""
+    global LOCAL_PUBLIC_IP
+    if LOCAL_PUBLIC_IP is None:
+        try:
+            LOCAL_PUBLIC_IP = requests.get(
+                'http://ip-api.com/json/?fields=query', timeout=10).json().get('query')
+        except Exception:
+            LOCAL_PUBLIC_IP = ''
+    return LOCAL_PUBLIC_IP or None
+
+
 def connect_test(host, port, line, log_path):
     """Bring up an SSTP tunnel, measure the egress country, tear it down."""
     result = {'host': host, 'port': port, 'line': line, 'live': False,
@@ -245,7 +276,9 @@ def connect_test(host, port, line, log_path):
         new_ifaces = list_ppp_interfaces() - before
         if new_ifaces:
             ppp_iface = sorted(new_ifaces)[-1]
-            break
+            if ppp_iface_ready(ppp_iface):
+                break  # addresses assigned, tunnel usable
+            ppp_iface = None  # seen but still negotiating; keep waiting
         time.sleep(0.5)
 
     if not ppp_iface:
@@ -263,13 +296,14 @@ def connect_test(host, port, line, log_path):
         result['reason'] = reason
         return result
 
-    # Tunnel is up (ppp interface exists). Send the country probe THROUGH it.
-    code, country, egress = geo_via_tunnel(ppp_iface)
+    # Tunnel is up. Send the country probe THROUGH it (host route via ppp).
+    code, country, egress = geo_via_tunnel(ppp_iface, local_ip=local_public_ip())
     if code:
         result.update(live=True, code=code, country=country, egress=egress,
                       reason='OK')
     else:
         result['reason'] = 'NO_EGRESS'  # tunnel up but no forwarded traffic
+        log(f'      sstpc tail: {compressed_tail(log_tail(log_path))}')
         log(f'      sstpc tail: {compressed_tail(log_tail(log_path))}')
 
     kill_session(proc)
