@@ -1,0 +1,61 @@
+name: debug-sstp-handshake
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+
+    steps:
+    - name: System / ppp device diagnostics
+      run: |
+        uname -a
+        echo '--- /dev/ppp before modprobe ---'
+        ls -l /dev/ppp || true
+        sudo modprobe ppp_generic || true
+        sudo modprobe ppp_async || true
+        echo '--- /dev/ppp after modprobe ---'
+        ls -l /dev/ppp || echo 'NO /dev/ppp !!'
+        lsmod | grep -E 'ppp|slhc' || true
+
+    - name: Install sstp-client
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y sstp-client ppp
+        sstpc --version
+        ls -l /usr/lib/pppd/*/sstp-pppd-plugin.so || echo 'PLUGIN NOT FOUND'
+
+    - name: Probe hosts with different invocation modes
+      run: |
+        run_mode () {
+          local label="$1"; shift
+          echo ""
+          echo "============================================================"
+          echo "===== MODE: $label ====="
+          echo "============================================================"
+          timeout 50 "$@" 2>&1 | tail -60
+          echo "----- exit: $? -----"
+          sleep 3
+        }
+
+        # MODE A: current usage (log level 4 for detail)
+        run_mode "A full opts  public-vpn-90" \
+          sudo sstpc --log-stderr --log-level 4 --tls-ext --cert-warn \
+          --user vpn --password vpn public-vpn-90.opengw.net:443 \
+          noauth noipdefault nodefaultroute refuse-eap refuse-chap \
+          refuse-mschap require-mschap-v2 noccp nobsdcomp nodeflate novj novjccomp
+
+        # MODE B: minimal opts, same host
+        run_mode "B minimal     public-vpn-90" \
+          sudo sstpc --log-stderr --log-level 4 --cert-warn \
+          --user vpn --password vpn public-vpn-90.opengw.net:443
+
+        # MODE C: minimal opts, no tls-ext, different host
+        run_mode "C no tls-ext  vpn634109661" \
+          sudo sstpc --log-stderr --log-level 4 --cert-warn \
+          --user vpn --password vpn vpn634109661.opengw.net:443
+
+    - name: Interface state after probes
+      run: ip -o link show | sed 's/\\n//g'

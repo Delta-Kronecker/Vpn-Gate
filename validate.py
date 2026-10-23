@@ -104,13 +104,20 @@ def failure_reason(text):
         r'Could not resolve host.*', r'Could not connect.*', r'Verification of server.*',
         r'HTTP handshake.*', r'Connection was aborted.*', r'Negotiation with server.*',
         r'Failed to receive .*', r'CHAP authentication failed.*', r'Could not start PPP.*',
-        r'Could not initialize PPP.*', r'Connection established.*',
+        r'Could not initialize PPP.*', r'Can\'t open .*', r'unrecognized option.*',
+        r'Connection established.*',
     ]
     for pat in patterns:
         m = re.findall(pat, text)
         if m:
             return m[0][:120]
     return 'unknown'
+
+
+def compressed_tail(text, limit=260):
+    """One-line, printable version of a log tail for the Actions console."""
+    text = re.sub(r'[\r\n\t ]+', ' ', text).strip()
+    return text[-limit:]
 
 
 # ------------------------------------------------------------------------------
@@ -237,9 +244,18 @@ def connect_test(host, port, line, log_path):
         time.sleep(0.5)
 
     if not ppp_iface:
-        result['reason'] = failure_reason(log_tail(log_path)) or 'CONNECT_FAIL'
+        still_running = (proc.poll() is None)
+        tail = log_tail(log_path)
         kill_session(proc)
         log_file.close()
+        reason = failure_reason(tail)
+        if reason == 'unknown':
+            if still_running:
+                reason = 'TIMEOUT_NO_PPP (sstpc alive but no tunnel)'
+            else:
+                reason = f'EXIT_FAIL(code={proc.returncode or "?"}) (unknown log)'
+            log(f'      sstpc tail: {compressed_tail(tail)}')
+        result['reason'] = reason
         return result
 
     # Tunnel is up (ppp interface exists). Send the country probe THROUGH it.
@@ -249,6 +265,7 @@ def connect_test(host, port, line, log_path):
                       reason='OK')
     else:
         result['reason'] = 'NO_EGRESS'  # tunnel up but no forwarded traffic
+        log(f'      sstpc tail: {compressed_tail(log_tail(log_path))}')
 
     kill_session(proc)
     log_file.close()
@@ -358,6 +375,25 @@ def load_raw_lines():
         return [ln.strip() for ln in f if ln.strip()]
 
 
+def dedupe_lines(lines):
+    """Normalize + remove duplicate hosts (one entry per hostname, all sources
+    merged). Entries with an explicit port are kept over port-less equals."""
+    chosen = {}
+    for line in lines:
+        line = line.strip()
+        m = LINE_RE.match(line)
+        if not m:
+            continue
+        host = m.group(1).lower()
+        port = m.group(2) or ''
+        if host not in chosen or (port and not chosen[host][1]):
+            chosen[host] = (m.group(1), port)
+    out = []
+    for _, (host, port) in sorted(chosen.items()):
+        out.append(f'{host}:{port}' if port else host)
+    return out
+
+
 def main():
     os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -365,6 +401,9 @@ def main():
     if raw_lines is None:
         print(f'RAW_FILE not found: {RAW_FILE}')
         return 1
+
+    raw_lines = dedupe_lines(raw_lines)
+    print(f'After dedupe: {len(raw_lines)} unique hosts to test.')
 
     force_dns = '--dns-only' in sys.argv or os.getenv('SSTP_SKIP_TEST') == '1'
     sstpc_available = os.path.exists(SSTPC)
