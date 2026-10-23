@@ -33,8 +33,8 @@ jobs:
           ifname sstpdB > /tmp/sstp-b.log 2>&1 &
         echo "two dials launched"
         for i in $(seq 1 40); do
-          A=$(ip -o -4 addr show dev sstpdA 2>/dev/null | grep -c inet)
-          B=$(ip -o -4 addr show dev sstpdB 2>/dev/null | grep -c inet)
+          A=$(ip -o -4 addr show dev sstpdA 2>/dev/null | grep -c inet || true)
+          B=$(ip -o -4 addr show dev sstpdB 2>/dev/null | grep -c inet || true)
           echo "try$i  A=$A  B=$B"
           if [ "$A" = "1" ] && [ "$B" = "1" ]; then break; fi
           sleep 1
