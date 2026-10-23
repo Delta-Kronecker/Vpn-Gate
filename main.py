@@ -221,8 +221,8 @@ def main():
 
     print(f"📥 Downloading CSVs from {len(mirrors)} mirrors + GitHub sources (Parallel)...")
 
-    fetch_jobs = [(fetch_csv_from_mirror, url) for url in mirrors]
-    fetch_jobs += [(fetch_georgexie_mirror, None), (fetch_fdciabdul_list, None)]
+    fetch_jobs = [(fetch_csv_from_mirror, (url,)) for url in mirrors]
+    fetch_jobs += [(fetch_georgexie_mirror, ()), (fetch_fdciabdul_list, ())]
 
     with ThreadPoolExecutor(max_workers=10) as executor:
         future_to_source = {

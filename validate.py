@@ -54,8 +54,11 @@ IP    = shutil.which('ip') or '/usr/sbin/ip'
 SSTP_OPTS = ['--log-stderr', '--log-level', '2', '--tls-ext', '--cert-warn']
 PPPD_OPTS = ['noauth', 'noipdefault', 'nodefaultroute',
              'refuse-eap', 'refuse-chap', 'refuse-mschap',
-             'require-mschap-v2',
              'noccp', 'nobsdcomp', 'nodeflate', 'novj', 'novjccomp']
+# NOTE: do NOT pass require-mschap-v2 - in pppd it means "the PEER must
+# authenticate itself with MSCHAPv2", which fails without a chap-secrets
+# entry. The sstp-pppd-plugin already handles our own MSCHAPv2 auth using
+# the user/password given to sstpc.
 
 # GeoIP services used through the tunnel. The first one that answers wins.
 GEO_PROVIDERS = [
@@ -105,6 +108,8 @@ def failure_reason(text):
         r'HTTP handshake.*', r'Connection was aborted.*', r'Negotiation with server.*',
         r'Failed to receive .*', r'CHAP authentication failed.*', r'Could not start PPP.*',
         r'Could not initialize PPP.*', r'Can\'t open .*', r'unrecognized option.*',
+        r'The remote system is required to authenticate.*',
+        r'suitable secret \(password\).*', r'Authentication failed.*',
         r'Connection established.*',
     ]
     for pat in patterns:

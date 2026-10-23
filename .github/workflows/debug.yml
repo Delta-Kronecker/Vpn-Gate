@@ -9,53 +9,44 @@ jobs:
     timeout-minutes: 12
 
     steps:
-    - name: System / ppp device diagnostics
-      run: |
-        uname -a
-        echo '--- /dev/ppp before modprobe ---'
-        ls -l /dev/ppp || true
-        sudo modprobe ppp_generic || true
-        sudo modprobe ppp_async || true
-        echo '--- /dev/ppp after modprobe ---'
-        ls -l /dev/ppp || echo 'NO /dev/ppp !!'
-        lsmod | grep -E 'ppp|slhc' || true
-
     - name: Install sstp-client
       run: |
+        sudo modprobe ppp_generic || true
+        sudo modprobe ppp_async || true
+        ls -l /dev/ppp || echo 'NO /dev/ppp !!'
         sudo apt-get update
         sudo apt-get install -y sstp-client ppp
         sstpc --version
-        ls -l /usr/lib/pppd/*/sstp-pppd-plugin.so || echo 'PLUGIN NOT FOUND'
+        ls -l /usr/lib/pppd/*/sstp-pppd-plugin.so
 
-    - name: Probe hosts with different invocation modes
+    - name: Full end-to-end SSTP test (dial + tunnel GeoIP probe)
       run: |
-        run_mode () {
-          local label="$1"; shift
-          echo ""
-          echo "============================================================"
-          echo "===== MODE: $label ====="
-          echo "============================================================"
-          timeout 50 "$@" 2>&1 | tail -60
-          echo "----- exit: $? -----"
-          sleep 3
-        }
-
-        # MODE A: current usage (log level 4 for detail)
-        run_mode "A full opts  public-vpn-90" \
-          sudo sstpc --log-stderr --log-level 4 --tls-ext --cert-warn \
+        set -x
+        sudo sstpc --log-stderr --log-level 2 --tls-ext --cert-warn \
           --user vpn --password vpn public-vpn-90.opengw.net:443 \
           noauth noipdefault nodefaultroute refuse-eap refuse-chap \
-          refuse-mschap require-mschap-v2 noccp nobsdcomp nodeflate novj novjccomp
-
-        # MODE B: minimal opts, same host
-        run_mode "B minimal     public-vpn-90" \
-          sudo sstpc --log-stderr --log-level 4 --cert-warn \
-          --user vpn --password vpn public-vpn-90.opengw.net:443
-
-        # MODE C: minimal opts, no tls-ext, different host
-        run_mode "C no tls-ext  vpn634109661" \
-          sudo sstpc --log-stderr --log-level 4 --cert-warn \
-          --user vpn --password vpn vpn634109661.opengw.net:443
-
-    - name: Interface state after probes
-      run: ip -o link show | sed 's/\\n//g'
+          refuse-mschap noccp nobsdcomp nodeflate novj novjccomp \
+          > /tmp/sstp.log 2>&1 &
+        echo "sstpc launched"
+        PPP_OK=0
+        for i in $(seq 1 30); do
+          if ip -o link | grep -Eo 'ppp[0-9]+'; then PPP_OK=1; echo "PPP interface up after ${i}s"; break; fi
+          sleep 1
+        done
+        if [ "$PPP_OK" = "1" ]; then
+          IFACE=$(ip -o link | grep -Eo 'ppp[0-9]+' | head -1)
+          echo "Interface: $IFACE"
+          ip addr show "$IFACE"
+          GEO_IP=$(getent hosts ip-api.com | awk '{print $1; exit}')
+          echo "GeoIP host: $GEO_IP"
+          sudo ip route replace "$GEO_IP/32" dev "$IFACE"
+          curl -s --max-time 10 "http://ip-api.com/json/?fields=status,country,countryCode,query"
+          echo
+          sudo ip route del "$GEO_IP/32" || true
+        else
+          echo "PPP interface did NOT come up"
+        fi
+        sudo pkill -9 sstpc || true
+        sudo pkill -9 pppd || true
+        echo '=========== /tmp/sstp.log ==========='
+        cat /tmp/sstp.log || true
