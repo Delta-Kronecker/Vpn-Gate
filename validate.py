@@ -20,9 +20,11 @@ import json
 import time
 import shutil
 import socket
+import threading
 import subprocess
 import requests
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ------------------------------------------------------------------------------
 # Config
@@ -43,9 +45,11 @@ LOG_DIR  = _p(os.getenv('SSTP_LOG_DIR') or 'validate_logs')
 SSTP_USER = os.getenv('SSTP_USER', 'vpn')
 SSTP_PASS = os.getenv('SSTP_PASSWORD', 'vpn')
 
-CONNECT_TIMEOUT = int(os.getenv('SSTP_CONNECT_TIMEOUT', '30'))  # wait for ppp interface
+CONNECT_TIMEOUT = int(os.getenv('SSTP_CONNECT_TIMEOUT', '35'))  # wait for ppp interface
 TEST_TIMEOUT    = int(os.getenv('SSTP_TEST_TIMEOUT', '15'))     # per geo request
 MIN_LIVE        = int(os.getenv('SSTP_MIN_LIVE', '5'))          # safety threshold
+ATTEMPTS        = max(1, int(os.getenv('SSTP_ATTEMPTS', '2')))  # retry count for dead hosts
+PARALLEL        = max(1, int(os.getenv('SSTP_PARALLEL', '4')))  # concurrent dial groups
 
 SSTPC = shutil.which('sstpc') or '/usr/sbin/sstpc'
 IP    = shutil.which('ip') or '/usr/sbin/ip'
@@ -110,7 +114,8 @@ def failure_reason(text):
         r'Could not initialize PPP.*', r'Can\'t open .*', r'unrecognized option.*',
         r'The remote system is required to authenticate.*',
         r'suitable secret \(password\).*', r'Authentication failed.*',
-        r'Connection established.*',
+        r'Connection established.*', r'Connect timed out.*', r'Connection timed out.*',
+        r'Could not complete connect.*',
     ]
     for pat in patterns:
         m = re.findall(pat, text)
@@ -145,11 +150,14 @@ def list_ppp_interfaces():
 # ------------------------------------------------------------------------------
 
 def geo_via_tunnel(iface, local_ip=None):
-    """Query GeoIP providers through the ppp interface (host route)."""
+    """Query GeoIP providers through the ppp interface (host route).
+    The routing table is process-wide and shared by all parallel dials, so
+    the probe is serialized with a lock (routing races would mix tunnels)."""
     for geo_host, geo_url in GEO_PROVIDERS:
         geo_ip = resolve_host(geo_host)
         route_added = False
         try:
+            GEO_LOCK.acquire()
             if geo_ip:
                 r = sudo([IP, 'route', 'replace', geo_ip + '/32', 'dev', iface])
                 route_added = (r.returncode == 0)
@@ -170,6 +178,8 @@ def geo_via_tunnel(iface, local_ip=None):
         finally:
             if geo_ip:
                 sudo([IP, 'route', 'del', geo_ip + '/32'])
+            if GEO_LOCK.locked():
+                GEO_LOCK.release()
     return None, None, None
 
 
@@ -201,18 +211,18 @@ def geo_batch(ips):
 # ------------------------------------------------------------------------------
 
 def kill_session(proc):
+    """Terminate this dial's process group (sstpc + its pppd child)."""
     if proc is not None and proc.poll() is None:
-        sudo(['kill', '-TERM', str(proc.pid)])
+        # Negative pid = process group (Popen used start_new_session=True)
+        sudo(['kill', '-TERM', '-' + str(proc.pid)])
         try:
             proc.wait(timeout=8)
         except subprocess.TimeoutExpired:
-            sudo(['kill', '-9', str(proc.pid)])
+            sudo(['kill', '-9', '-' + str(proc.pid)])
             try:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
-    # Ensure nothing lingers for the next round
-    sudo(['pkill', '-TERM', 'pppd'])
 
 
 def ppp_iface_ready(iface):
@@ -229,6 +239,8 @@ def ppp_iface_ready(iface):
 
 
 LOCAL_PUBLIC_IP = None
+GEO_LOCK = threading.Lock()
+PRINT_LOCK = threading.Lock()
 
 def local_public_ip():
     """The runner's direct egress IP (cached) - used to detect leaked probes."""
@@ -243,7 +255,10 @@ def local_public_ip():
 
 
 def connect_test(host, port, line, log_path):
-    """Bring up an SSTP tunnel, measure the egress country, tear it down."""
+    """Bring up an SSTP tunnel, measure the egress country, tear it down.
+
+    Runs under a dedicated pppd interface name (ifname) so several dials can
+    be tested in parallel without interfering with each other."""
     result = {'host': host, 'port': port, 'line': line, 'live': False,
               'code': None, 'country': None, 'egress': None, 'reason': None}
 
@@ -255,14 +270,19 @@ def connect_test(host, port, line, log_path):
     # sstpc natively parses host:port; default port is 443 when omitted
     target = f'{host}:{port}' if port else host
 
-    before = list_ppp_interfaces()
+    # Unique interface name for this dial (pppd option 'ifname')
+    index_tag = log_path.split(os.sep)[-1].split('_')[0]
+    iface_name = f'sstp{index_tag}'[:15]
+
     log_file = open(log_path, 'wb')
     cmd = ['sudo', '-n', SSTPC] + SSTP_OPTS + [
-        '--user', SSTP_USER, '--password', SSTP_PASS, target] + PPPD_OPTS
+        '--user', SSTP_USER, '--password', SSTP_PASS, target] + PPPD_OPTS + \
+        ['ifname', iface_name]
     proc = None
     try:
         proc = subprocess.Popen(cmd, stdout=log_file, stderr=log_file,
-                                stdin=subprocess.DEVNULL)
+                                stdin=subprocess.DEVNULL,
+                                start_new_session=True)
     except Exception as exc:
         result['reason'] = f'SPAWN_FAIL {exc}'[:120]
         log_file.close()
@@ -273,12 +293,10 @@ def connect_test(host, port, line, log_path):
     while time.time() - started < CONNECT_TIMEOUT:
         if proc.poll() is not None:
             break  # sstpc exited -> tunnel never came up
-        new_ifaces = list_ppp_interfaces() - before
-        if new_ifaces:
-            ppp_iface = sorted(new_ifaces)[-1]
-            if ppp_iface_ready(ppp_iface):
+        if iface_name in list_ppp_interfaces():
+            if ppp_iface_ready(iface_name):
+                ppp_iface = iface_name
                 break  # addresses assigned, tunnel usable
-            ppp_iface = None  # seen but still negotiating; keep waiting
         time.sleep(0.5)
 
     if not ppp_iface:
@@ -304,14 +322,13 @@ def connect_test(host, port, line, log_path):
     else:
         result['reason'] = 'NO_EGRESS'  # tunnel up but no forwarded traffic
         log(f'      sstpc tail: {compressed_tail(log_tail(log_path))}')
-        log(f'      sstpc tail: {compressed_tail(log_tail(log_path))}')
 
     kill_session(proc)
     log_file.close()
 
-    # Let the kernel fully clean the interface before the next dial
+    # Give the kernel a moment to tear the interface down
     for _ in range(12):
-        if not (list_ppp_interfaces() - before):
+        if ppp_iface not in list_ppp_interfaces():
             break
         time.sleep(0.5)
 
@@ -465,29 +482,61 @@ def main():
         return 0
 
     # ------------------------------------------------------------------ full test
-    log(f'Starting sequential SSTP connect-test on {len(raw_lines)} hosts '
-        f'(each host is dialed alone, country detected through the tunnel)...')
+    log(f'Starting SSTP connect-test on {len(raw_lines)} hosts '
+        f'({PARALLEL} dials in parallel, up to {ATTEMPTS} attempts per host, '
+        'country detected through the tunnel)...')
 
-    results = []
+    results_by_index = {}
     live_count = 0
-    for index, line in enumerate(raw_lines, start=1):
-        m = LINE_RE.match(line.strip())
-        if not m:
-            continue
-        host, port = m.group(1), m.group(2)
-        log_path = os.path.join(LOG_DIR, f'{index:03d}_{host.replace(":", "_")}.log')
 
-        row = connect_test(host, port, line, log_path)
+    def progress(index, row, attempt):
         flag = 'LIVE' if row['live'] else 'DEAD'
         extra = ''
         if row['live']:
-            live_count += 1
             extra = f'  egress={row["egress"]}'
         elif row.get('reason') and row['reason'] != 'OK':
             extra = f'  ({row["reason"]})'
-        log(f'[{index}/{len(raw_lines)}] {host} -> {flag} {row["code"] or "-"}{extra}')
-        results.append(row)
-        time.sleep(0.3)
+        if attempt > 1:
+            extra += f'  [try {attempt}]'
+        with PRINT_LOCK:
+            log(f'[{index}/{len(raw_lines)}] {row["host"]} -> {flag} '
+                f'{row["code"] or "-"}{extra}')
+
+    def test_one(index, line):
+        """Dial one host (with retries); returns the best result row."""
+        m = LINE_RE.match(line.strip())
+        if not m:
+            return None
+        host, port = m.group(1), m.group(2)
+        best = None
+        for attempt in range(1, ATTEMPTS + 1):
+            log_path = os.path.join(
+                LOG_DIR, f'{index:03d}_{host.replace(":", "_")}_{attempt}.log')
+            row = connect_test(host, port, line, log_path)
+            progress(index, row, attempt)
+            if row['live']:
+                return row
+            best = row  # remember last failure reason
+            if attempt < ATTEMPTS:
+                time.sleep(1.5 * attempt)  # small backoff before the retry
+        return best
+
+    # Group-testing: several dials run concurrently, each on its own ppp
+    # interface; the GeoIP probe itself stays serialized (shared routing).
+    with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
+        futures = {}
+        for index, line in enumerate(raw_lines, start=1):
+            futures[pool.submit(test_one, index, line)] = index, line
+        for fut in as_completed(futures):
+            row = fut.result()
+            if row is None:
+                continue
+            index, line = futures[fut]
+            results_by_index[index] = row
+            if row['live']:
+                live_count += 1
+
+    results = [results_by_index[i] for i in sorted(results_by_index)]
 
     log(f'Connect-test finished: live={live_count} / total={len(results)}')
 

@@ -17,40 +17,43 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y sstp-client ppp
         sstpc --version
-        ls -l /usr/lib/pppd/*/sstp-pppd-plugin.so
 
-    - name: Full end-to-end SSTP test (dial + tunnel GeoIP probe)
+    - name: Two parallel dials with unique ifname + GeoIP check
       run: |
         set -x
         sudo sstpc --log-stderr --log-level 2 --tls-ext --cert-warn \
           --user vpn --password vpn public-vpn-90.opengw.net:443 \
           noauth noipdefault nodefaultroute refuse-eap refuse-chap \
           refuse-mschap noccp nobsdcomp nodeflate novj novjccomp \
-          > /tmp/sstp.log 2>&1 &
-        echo "sstpc launched"
-        PPP_OK=0
+          ifname sstpdA > /tmp/sstp-a.log 2>&1 &
+        sudo sstpc --log-stderr --log-level 2 --tls-ext --cert-warn \
+          --user vpn --password vpn public-vpn-162.opengw.net:443 \
+          noauth noipdefault nodefaultroute refuse-eap refuse-chap \
+          refuse-mschap noccp nobsdcomp nodeflate novj novjccomp \
+          ifname sstpdB > /tmp/sstp-b.log 2>&1 &
+        echo "two dials launched"
         for i in $(seq 1 40); do
-          IF=$(ip -o link | grep -Eo 'ppp[0-9]+' | head -1)
-          if [ -n "$IF" ] && ip -o -4 addr show dev "$IF" | grep -q inet; then
-            PPP_OK=1; echo "PPP interface $IF up with IP after ${i}s"; break
-          fi
+          A=$(ip -o -4 addr show dev sstpdA 2>/dev/null | grep -c inet)
+          B=$(ip -o -4 addr show dev sstpdB 2>/dev/null | grep -c inet)
+          echo "try$i  A=$A  B=$B"
+          if [ "$A" = "1" ] && [ "$B" = "1" ]; then break; fi
           sleep 1
         done
         set +e
-        if [ "$PPP_OK" = "1" ]; then
-          IFACE=$(ip -o link | grep -Eo 'ppp[0-9]+' | head -1)
-          echo "Interface: $IFACE"
-          ip addr show "$IFACE"
-          GEO_IP=$(getent hosts ip-api.com | awk '{print $1; exit}')
-          echo "GeoIP host: $GEO_IP"
-          sudo ip route replace "$GEO_IP/32" dev "$IFACE"
-          curl -s --max-time 15 "http://ip-api.com/json/?fields=status,country,countryCode,query"
-          echo
-          sudo ip route del "$GEO_IP/32" || true
-        else
-          echo "PPP interface did NOT come up"
-        fi
+        echo '=== interfaces ==='
+        ip -o -4 addr show | grep sstp
+        echo '=== GeoIP via sstpdA ==='
+        GEO_IP=$(getent hosts ip-api.com | awk '{print $1; exit}')
+        sudo ip route replace "$GEO_IP/32" dev sstpdA
+        curl -s --max-time 15 "http://ip-api.com/json/?fields=status,country,countryCode,query"
+        echo
+        sudo ip route replace "$GEO_IP/32" dev sstpdB
+        curl -s --max-time 15 "http://ip-api.com/json/?fields=status,country,countryCode,query"
+        echo
+        sudo ip route del "$GEO_IP/32" || true
         sudo pkill -9 sstpc || true
         sudo pkill -9 pppd || true
-        echo '=========== /tmp/sstp.log ==========='
-        cat /tmp/sstp.log || true
+        echo '=========== /tmp/sstp-a.log ==========='
+        cat /tmp/sstp-a.log || true
+        echo '=========== /tmp/sstp-b.log ==========='
+        cat /tmp/sstp-b.log || true
